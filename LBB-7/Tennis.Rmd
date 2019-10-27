@@ -1,0 +1,286 @@
+---
+title: "Best Tennis Player Analysis (LBB)"
+author: "[Faris Dzikrur Rahman](https://dzelrahman.wordpress.com/)"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+mail: "dzelrahman@gmail.com"
+linkedin: "faris-rahman-077a70172"
+twitter: "dzelrahman"
+home: "www.dzelrahman.com"
+output:
+  epuRate::epurate:
+    toc: TRUE
+    number_sections: FALSE
+    code_folding: "hide"
+---
+
+
+# Background and Methodology
+For this LBB, I use Grand Slam men's single matches data from 2000 to 2017 which I get from Kaggle. The data is structured by each row containing one match, including match info, along with winning and losing player's statistics. The goal of this LBB is to explore how top tennis players group together based on their statistics, partiuclarly in the matches that have best of 5 format, using Principle Component Analysis (PCA) and k-means clustering analysis. In addition, I also explore how clusters of players differ by surface (hard, clay, and grass).
+
+# Load Library and Read Data
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(stringr)
+library(ggrepel)
+library(graphics)
+library(factoextra)
+library(ggdendro)
+library(lubridate)
+library(FactoMineR)
+library(epuRate)
+library(devtools)
+library(rmarkdown)
+library(ggthemes)
+```
+
+```{r}
+file_dir = "atp-matches-dataset/"
+
+filelist <- list()
+count = 1
+for (file in list.files(file_dir)){
+  if (str_detect(file, ".csv") ==TRUE) {
+    #print(count)
+    file_read <- read_csv(file.path(file_dir, file), col_types = cols())
+    print(dim(file_read))
+    filelist[[count]] <- file_read
+    count = count +1
+  }
+}
+```
+
+# Exploratory Data Analysis
+
+Since we are going to use all data that is available to us, we combine this data into one data frame.
+```{r}
+all_matches <- do.call(rbind, filelist)
+dim(all_matches)
+head(all_matches)
+glimpse(all_matches)
+```
+
+Here, what I do is choosing the matches that have best of 5 format, since we only want to know the statistics of each player when they play grand slam tournament and oher tournament that have same format, which basically a best of 5 tournament. With that in mind, we don't consider any matches beside grand slam tournament and other tournament. 
+```{r}
+all_matches_2 <- all_matches %>% 
+  filter(best_of==5, score != "3-Jun") %>% 
+  select(-winner_seed, -winner_entry, -loser_seed, -loser_entry, -winner_ht, -loser_ht) %>% 
+  na.omit() %>% 
+  mutate(drawsize = draw_size,
+         num_sets = str_count(score, "[0-9]-[0-9]|[1-9][0-9]-[1-9][0-9]|[1-9][0-9]-[0-9]|[0-9]-[1-9][0-9]"),
+         tiebreaks_total = str_count(score, "\\(")
+         ) %>%
+  select(-draw_size)
+
+dim(all_matches_2)
+head(all_matches_2)
+```
+
+Here are all of the tournament that have best of 5 format. Apparently, not only Grand Slam that have best of 5 format, but there are several masters tournament that also have same format. Davis Cup, the 'World Cup' of tennis, also have same format. 
+```{r}
+unique(all_matches_2$tourney_name)
+```
+
+Next, we want to know how many sets did each player win in each of those matches.
+```{r}
+score2 = str_replace_all(all_matches_2$score, "\\([0-9]\\)|\\([1-9][0-9]\\)","")
+
+num <- nrow(all_matches_2)
+w_sets_won = numeric(num)
+w_games_won = numeric(num)
+l_games_won = numeric(num)
+
+for (i in 1:num) {
+  set = all_matches_2$num_sets[i]
+  set_won = numeric(set)
+  set_score = str_split(score2[i]," ")[[1]]
+  
+  w_games = 0
+  l_games = 0
+  
+  if ((length(set_score)) == 1 & (set_score[1] == "RET")) {
+    w_sets_won[i] = 0
+    w_games_won[i] = 0
+    l_games_won[i] = 0
+  } else{
+    for (j in 1:set) {
+      game_score = str_split(set_score[j], "-")[[1]]
+      set_won[j] = as.numeric(game_score[1]) > as.numeric(game_score[2])
+      
+      w_games = w_games + as.numeric(game_score[1])
+      l_games = l_games + as.numeric(game_score[2])
+      
+    }
+    w_sets_won[i] = sum(set_won)
+    w_games_won[i] = w_games
+    l_games_won[i] = l_games
+  }
+}
+```
+
+Out of curiousity and to strengthen the clustering, we also want to know how many time did the players win from tie break in each of the match.
+```{r}
+w_tb_won = numeric(num)
+for (i in 1:num) {
+  tb = str_extract_all(all_matches_2$score[i], "[0-9]-[0-9]\\([0-9]\\)","")[1,]
+  
+  if (identical(tb, character(0)) ) {
+    w_tb_won[i] = 0
+  } else {
+    tb_won = numeric(length(tb))
+    for (j in 1:length(tb)) {
+      score = tb[j]
+      tb_won[j] = as.numeric(str_sub(score, 1, 1)) > as.numeric(str_sub(score, 3, 3))
+    }
+    w_tb_won[i] = sum(tb_won)
+    
+  }
+}
+```
+
+Lastly, we add match statistics, that can give us a clue on the characteristics of each player in each matches. 
+```{r}
+matches.df <- all_matches_2 %>%
+  mutate(w_sets_won = w_sets_won,     
+         l_sets_won = num_sets - w_sets_won,
+         w_games_won = w_games_won,
+         l_games_won = l_games_won,
+         w_tb_won = w_tb_won,
+         l_tb_won = tiebreaks_total - w_tb_won,
+         tourney_date = ymd(tourney_date),
+         w_2ndIn = w_svpt - w_1stIn -w_df,
+         l_2ndIn = l_svpt - l_1stIn - l_df)
+
+dim(matches.df)
+head(matches.df)
+```
+
+# Data Analysis
+We will use PCA to know how does the player cluster based on their statistics throughout 2000 - 2017. But, before doing that, first we should create another data frame that gather all best player based on the statistics above. By creating this data frame, the PCA analysis and clustering become possible.  Each row in best player dataframe is a player who has been ever in top 30 from 2000 to 2017 and played more than 50 matches in best of 5 singles. The variables in player data frame, include:
+
+-player_1stServeWon_p: first serve win percentage
+-player_2ndServeWon_p: second serve win percentage
+-player_ace_p: ace percentage
+-player_df_p: double fault percentage
+-games_per_match: average number of games per match
+-player_tbWon_p: tiebreak won percentage
+-player_bpSaved_p: breakpoint saved percentage
+-opponent_bpBreak_p: breaking opponent's serves percentage
+
+##Best Player
+```{r}
+winner.df <- matches.df %>%
+  mutate(player_victory = TRUE)
+colnames(winner.df) <- str_replace(colnames(winner.df), "winner_|w_", "player_")
+colnames(winner.df) <- str_replace(colnames(winner.df), "loser_|l_", "opponent_")
+
+loser.df <- matches.df %>%
+  mutate(player_victory = FALSE)
+colnames(loser.df) <- str_replace(colnames(loser.df), "loser_|l_", "player_")
+colnames(loser.df) <- str_replace(colnames(loser.df), "winner_|w_", "opponent_")
+
+best_player.df <-  winner.df %>%
+  rbind(loser.df) %>%
+  group_by(player_name) %>%
+  summarise(
+         player_rank_best = min(player_rank),
+         player_1stServeWon_p = sum(player_1stWon) / sum(player_1stIn),
+         player_2ndServeWon_p = sum(player_2ndWon) / sum(player_2ndIn),
+         player_ace_p = sum(player_ace) / sum(player_svpt), 
+         player_df_p = sum(player_df) / sum(player_svpt), 
+         games_per_match = (sum(player_games_won) + sum(opponent_games_won)) / n(),
+         player_tbWon_p = sum(player_tb_won)/sum(tiebreaks_total),
+         player_bpSaved_p = sum(player_bpSaved)/sum(player_bpFaced),
+         opponent_bpBreak_p = 1 - sum(opponent_bpSaved)/sum(opponent_bpFaced),
+         match_played = n()
+  )     %>%
+  filter(player_rank_best < 30, match_played > 50) %>%
+  dplyr::select(-player_rank_best, -match_played) 
+
+head(best_player.df)
+```
+
+## Principle Component Analysis (PCA)
+Now, let's create PCA out of best player data frame and print the result.
+```{r}
+set.seed(1)
+players <- best_player.df$player_name
+best_player.df1 <- data.frame(scale(best_player.df[,-1]))
+
+firstname <- str_split(players,"",n=2, simplify=T)[,1]
+lastname <- str_split(players,"",n=2,simplify = T)[,2]
+name <- paste0(str_sub(firstname,1,1),".", lastname)
+
+row.names(best_player.df1) <- name
+tennis.pca <- prcomp(best_player.df1)
+tennis.pca
+```
+
+Let's plot the PCA data using `biplot()` function.
+```{r}
+biplot(tennis.pca, cex=0.7)
+```
+
+To make the plot more clearer, we could exclude the player name from the plot by using `fviz_pca_byplot()`. We could also know from this plot that PCA has worked well in our data since PCA1 and PCA2 already capture 64.5% of the variation.
+```{r}
+fviz_pca_biplot(tennis.pca,repel=TRUE, label = c("ind.sup", "quali", "var", "quanti.sup"))
+```
+
+To know the correlation, relationship, and outliers between each variables, let's bring back the player's name.
+```{r}
+fviz_pca_biplot(tennis.pca,repel=TRUE)
+```
+
+Conclusion from the PCA Plot:
+From the vectors, we could know that:
+- The more tiebreak one can break from his opponent (opponent_bp_Break_p), the fewer games he has to play per match (games_per_match).
+- If one is good at serving (1stServeWon_p and 2ndServeWon_p), he will also be good at winning tiebreaks (player_tbWon_p) and saving break points (player_bpSaved_p) . However, he isn't necessary good at breaking opponent's serves.
+-The ones who are good at serving doesn't necessarily have the best aces.
+
+From the points, we could know that:
+- 2 outlier points on the lower left corner are I. Karlovic (most carrer aces) and J. Isner (most aces in a tournament). Isner also plays most games per match in this dataset.
+- 2 outlier points on the upper left corner are M. Raonic (one of the best servers, all-court style) and P. Sampras (precise and powerful serve, all-court player)
+- 4 points on the top (around the vertical axis) are Nadal, Djokovic, Agassi and Murray. Federer is a little bit to the left. It seems they are both good at winning service games and breaking their opponent's serves.
+
+## K-Means Clustering
+Before we create cluster for each player, we should the optimal number of cluster using this elbow method below:
+```{r}
+fviz_nbclust(best_player.df1, kmeans, method = "wss")
+```
+Apparently, 5 cluster is the most optimum cluster we can get. Now, let's create the plot.
+
+```{r}
+set.seed(50)
+bestplayer_km <- kmeans(best_player.df1, 5)
+
+fviz_cluster(bestplayer_km, 
+             data = best_player.df1) + 
+  theme_minimal()
+```
+
+## Conclusion from Clustering
+Looking at this cluster, we can conclude that:
+
+- Red cluster : have high serve percentage, good at breaking opponent serve, tiebreaker winner, and good at saving breakpoint situation
+- Purple cluster: have high 1st serve winner (ace), but needs a lot of game to win the match
+- Yellow cluster: create a lot of double faults and need a lot of game to win the match
+- Blue cluster: Good at breaking opponent's serve
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
